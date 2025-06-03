@@ -1,0 +1,52 @@
+site_name: docker-layers
+repo_url: https://github.com/fudanglp/docker-layers
+site_url: https://fudanglp.github.io/docker-layers
+site_description: A GUI/CLI tool for inspecting Docker image layers, an alternative to Dive.
+site_author: Lipeng Guo
+edit_uri: edit/main/docs/
+repo_name: fudanglp/docker-layers
+copyright: Maintained by <a href="https://fudanglp.com">fudanglp</a>.
+
+nav:
+  - Home: index.md
+  - Modules: modules.md
+plugins:
+  - search
+  - mkdocstrings:
+      handlers:
+        python:
+          paths: ["src/docker_layers"]
+theme:
+  name: material
+  feature:
+    tabs: true
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: white
+      accent: deep orange
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: black
+      accent: deep orange
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+  icon:
+    repo: fontawesome/brands/github
+
+extra:
+  social:
+    - icon: fontawesome/brands/github
+      link: https://github.com/fudanglp/docker-layers
+    - icon: fontawesome/brands/python
+      link: https://pypi.org/project/docker-layers
+
+markdown_extensions:
+  - toc:
+      permalink: true
+  - pymdownx.arithmatex:
+      generic: true
