@@ -39,6 +39,10 @@ pub struct LayerInfo {
 
     /// Total size of files in this layer, in bytes
     pub size: u64,
+
+    /// Files in this layer (populated separately via list_files)
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub files: Vec<FileEntry>,
 }
 
 /// A single file entry within a layer.

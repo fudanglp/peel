@@ -51,7 +51,12 @@ pub fn run(image: &str, use_oci: bool, json: bool, runtime: Option<String>) -> R
         }
     };
 
-    let info = inspector.inspect(image)?;
+    let mut info = inspector.inspect(image)?;
+
+    // Populate file lists for each layer
+    for layer in &mut info.layers {
+        layer.files = inspector.list_files(layer)?;
+    }
 
     if cfg.json {
         println!("{}", serde_json::to_string_pretty(&info)?);
