@@ -1,5 +1,6 @@
 mod cmd;
 mod config;
+mod inspector;
 mod probe;
 
 use anyhow::Result;

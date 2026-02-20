@@ -1,33 +1,80 @@
 use std::io::{self, Write};
+use std::path::Path;
 
 use anyhow::Result;
 use crossterm::style::{self, Stylize};
 
 use crate::config;
-use crate::probe::RuntimeInfo;
+use crate::inspector::{self, Inspector};
+use crate::probe::{RuntimeInfo, StorageDriver};
 
 pub fn run(image: &str, use_oci: bool, json: bool, runtime: Option<String>) -> Result<()> {
     config::init_from_cli(json, runtime)?;
     let cfg = config::get();
 
-    // Check if we need root for direct storage access
-    if !use_oci {
+    // If the image looks like a tar file, use the archive inspector directly
+    let mut inspector: Box<dyn Inspector> = if looks_like_archive(image) {
+        Box::new(inspector::docker_archive::DockerArchiveInspector::new(
+            image.into(),
+        ))
+    } else if use_oci {
+        // Use OCI/runtime API path
+        let cmd = cfg
+            .probe
+            .default
+            .map(|i| cfg.probe.runtimes[i].binary_path.display().to_string())
+            .unwrap_or_else(|| "docker".to_string());
+        Box::new(inspector::oci::OciInspector::new(cmd))
+    } else {
+        // Direct storage access — may need sudo
         if let Some(idx) = cfg.probe.default {
             let rt = &cfg.probe.runtimes[idx];
             if !rt.can_read {
                 maybe_escalate(rt)?;
             }
+            match rt.storage_driver {
+                #[cfg(target_os = "linux")]
+                StorageDriver::Overlay2 | StorageDriver::Fuse | StorageDriver::Vfs => {
+                    Box::new(inspector::overlay2::Overlay2Inspector::new(
+                        rt.storage_root.clone(),
+                    ))
+                }
+                _ => {
+                    // Unsupported storage driver for direct access, fall back to OCI
+                    Box::new(inspector::oci::OciInspector::new(
+                        rt.binary_path.display().to_string(),
+                    ))
+                }
+            }
+        } else {
+            anyhow::bail!("No container runtime detected. Install Docker or Podman, or use a tar archive.");
+        }
+    };
+
+    let layers = inspector.list_layers(image)?;
+
+    if cfg.json {
+        println!("{}", serde_json::to_string_pretty(&layers)?);
+    } else {
+        for layer in &layers {
+            println!("{}", layer.digest);
+            if let Some(cmd) = &layer.created_by {
+                println!("  {cmd}");
+            }
+            println!("  size: {} bytes", layer.size);
+            println!();
         }
     }
 
-    if cfg.json {
-        println!("{{\"image\": \"{image}\", \"layers\": []}}");
-    } else {
-        println!("Inspecting image: {image}");
-        println!("(not yet implemented)");
-    }
-
     Ok(())
+}
+
+fn looks_like_archive(image: &str) -> bool {
+    let p = Path::new(image);
+    matches!(
+        p.extension().and_then(|e| e.to_str()),
+        Some("tar" | "gz" | "tgz")
+    ) || image.ends_with(".tar.gz")
 }
 
 /// Re-execute the current process under sudo.
