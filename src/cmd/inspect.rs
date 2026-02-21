@@ -10,7 +10,7 @@ use crate::inspector::{self, Inspector};
 use crate::probe::{RuntimeInfo, StorageDriver};
 use crate::progress::Spinner;
 
-pub fn run(image: &str, use_oci: bool, json: Option<&str>, runtime: Option<String>, web: bool) -> Result<()> {
+pub fn run(image: &str, use_oci: bool, json: Option<&str>, runtime: Option<String>, web: bool, no_sudo: bool) -> Result<()> {
     config::init_from_cli(json.is_some(), runtime)?;
     let cfg = config::get();
 
@@ -32,7 +32,7 @@ pub fn run(image: &str, use_oci: bool, json: Option<&str>, runtime: Option<Strin
         if let Some(idx) = cfg.probe.default {
             let rt = &cfg.probe.runtimes[idx];
             if !rt.can_read {
-                maybe_escalate(rt)?;
+                maybe_escalate(rt, no_sudo)?;
             }
             match rt.storage_driver {
                 #[cfg(target_os = "linux")]
@@ -189,51 +189,63 @@ fn looks_like_archive(image: &str) -> bool {
     ) || image.ends_with(".tar.gz")
 }
 
-/// Re-execute the current process under sudo.
+/// Re-execute the current process under sudo, setting PEEL_ESCALATED to prevent loops.
 fn escalate_with_sudo() -> Result<()> {
     let exe = std::env::current_exe()?;
     let args: Vec<String> = std::env::args().skip(1).collect();
     let status = std::process::Command::new("sudo")
         .arg(exe)
         .args(&args)
+        .env("PEEL_ESCALATED", "1")
         .status()?;
     std::process::exit(status.code().unwrap_or(1));
 }
 
-/// Prompt the user to re-run with sudo if direct storage access requires root.
-fn maybe_escalate(rt: &RuntimeInfo) -> Result<()> {
-    let mut stderr = io::stderr();
-    write!(
-        stderr,
-        "{} Direct layer access reads from {} which is owned by root.\n",
-        "!".yellow().bold(),
-        style::style(rt.storage_root.display()).bold()
-    )?;
-    write!(
-        stderr,
-        "  peel needs to re-run with {} to read layers directly.\n\n",
-        "sudo".bold()
-    )?;
-    write!(
-        stderr,
-        "  Alternatively, run with {} to read layers through the {} API\n",
-        "--use-oci".green().bold(),
-        rt.kind
-    )?;
-    write!(stderr, "  (no root needed, but slower).\n\n")?;
-    write!(stderr, "Re-run with sudo? {} ", "[Y/n]".dim())?;
-    stderr.flush()?;
+/// Auto-escalate to sudo unless --no-sudo is set.
+fn maybe_escalate(rt: &RuntimeInfo, no_sudo: bool) -> Result<()> {
+    let already_escalated = std::env::var("PEEL_ESCALATED").is_ok();
 
-    let mut answer = String::new();
-    io::stdin().read_line(&mut answer)?;
-    let answer = answer.trim().to_lowercase();
-
-    if answer.is_empty() || answer == "y" || answer == "yes" {
-        writeln!(stderr, "{}", "─".repeat(40).dim())?;
-        escalate_with_sudo()?;
+    if already_escalated {
+        anyhow::bail!(
+            "Already escalated but still cannot read {}. Check permissions.",
+            rt.storage_root.display()
+        );
     }
 
-    anyhow::bail!(
-        "Cannot read storage without root. Re-run with sudo or use --use-oci."
-    );
+    let mut stderr = io::stderr();
+    let bar: &str = &"─".repeat(56);
+    writeln!(stderr)?;
+    writeln!(stderr, "  {}",  bar.dim())?;
+    writeln!(
+        stderr,
+        "  {} Reading layers directly via {} — much faster,",
+        "▶".green().bold(),
+        style::style("overlay2").bold()
+    )?;
+    writeln!(
+        stderr,
+        "  but {} needs root to access {}",
+        "sudo".bold(),
+        style::style(rt.storage_root.display()).dim()
+    )?;
+    writeln!(stderr)?;
+    writeln!(stderr, "  Re-running as root...")?;
+    writeln!(stderr)?;
+    writeln!(
+        stderr,
+        "  {}",
+        "Can't sudo? Use --no-sudo to fall back to the OCI API.".dim()
+    )?;
+    writeln!(stderr, "  {}", bar.dim())?;
+    writeln!(stderr)?;
+
+    if no_sudo {
+        anyhow::bail!(
+            "Cannot read storage without root. Remove --no-sudo or use --use-oci."
+        );
+    }
+
+    escalate_with_sudo()?;
+
+    unreachable!()
 }

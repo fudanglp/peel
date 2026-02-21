@@ -24,9 +24,13 @@ struct Cli {
     #[arg(long, global = true)]
     use_oci: bool,
 
-    /// Open an interactive report in the browser
+    /// Disable the interactive web report
     #[arg(long, global = true)]
-    web: bool,
+    no_web: bool,
+
+    /// Don't auto-escalate to sudo for direct storage access
+    #[arg(long, global = true)]
+    no_sudo: bool,
 
     #[command(subcommand)]
     command: Option<Commands>,
@@ -63,7 +67,8 @@ fn main() -> Result<()> {
     }
 
     if let Some(image) = &image_to_inspect {
-        cmd::inspect::run(image, cli.use_oci, cli.json.as_deref(), cli.runtime, cli.web)?;
+        let web = !cli.no_web && cli.json.is_none();
+        cmd::inspect::run(image, cli.use_oci, cli.json.as_deref(), cli.runtime, web, cli.no_sudo)?;
     } else if matches!(cli.command, Some(Commands::Probe)) {
         cmd::probe::run(cli.json.is_some(), cli.runtime)?;
     }
