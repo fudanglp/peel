@@ -1,7 +1,7 @@
 import { useMemo } from "react";
 import type { FileEntry } from "@/types";
 import type { FileViewMode } from "./Toolbar";
-import { FileTree } from "./FileTree";
+import { FileTreeSplit } from "./FileTreeSplit";
 import { FileSizeList } from "./FileSizeList";
 
 export function FilePanel({
@@ -28,7 +28,7 @@ export function FilePanel({
   }
 
   if (fileViewMode === "tree") {
-    return <FileTree files={filtered} />;
+    return <FileTreeSplit files={filtered} />;
   }
 
   return <FileSizeList files={filtered} />;

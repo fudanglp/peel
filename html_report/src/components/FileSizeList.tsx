@@ -19,7 +19,7 @@ export function FileSizeList({ files }: { files: FileEntry[] }) {
         return (
           <div
             key={`${file.path}-${i}`}
-            className="flex items-center gap-2 py-0.5 px-2 text-sm font-mono hover:bg-muted/50 rounded relative"
+            className="flex items-center gap-2 py-0.5 px-2 text-sm hover:bg-muted/50 rounded relative"
           >
             <div
               className="absolute inset-y-0 left-0 bg-primary/5 rounded"
