@@ -2,6 +2,7 @@ mod cmd;
 mod config;
 mod inspector;
 mod probe;
+mod progress;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};

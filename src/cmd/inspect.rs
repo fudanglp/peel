@@ -8,6 +8,7 @@ use crossterm::style::{self, Stylize};
 use crate::config;
 use crate::inspector::{self, Inspector};
 use crate::probe::{RuntimeInfo, StorageDriver};
+use crate::progress::Spinner;
 
 pub fn run(image: &str, use_oci: bool, json: Option<&str>, runtime: Option<String>) -> Result<()> {
     config::init_from_cli(json.is_some(), runtime)?;
@@ -54,12 +55,15 @@ pub fn run(image: &str, use_oci: bool, json: Option<&str>, runtime: Option<Strin
 
     print_runtime_summary(cfg);
 
+    let spinner = Spinner::new("Resolving image metadata...");
     let mut info = inspector.inspect(image)?;
 
-    // Populate file lists for each layer
-    for layer in &mut info.layers {
+    let num_layers = info.layers.len();
+    for (i, layer) in info.layers.iter_mut().enumerate() {
+        spinner.set_message(format!("Reading layer {}/{} ...", i + 1, num_layers));
         layer.files = inspector.list_files(layer)?;
     }
+    spinner.finish(format!("Inspected {} layers", num_layers));
 
     if let Some(dest) = json {
         let output = serde_json::to_string_pretty(&info)?;
@@ -68,7 +72,7 @@ pub fn run(image: &str, use_oci: bool, json: Option<&str>, runtime: Option<Strin
         } else {
             fs::write(dest, &output)
                 .with_context(|| format!("Failed to write JSON to {dest}"))?;
-            eprintln!("Wrote {dest}");
+            eprintln!("{} Wrote {dest}", "✔".green());
         }
     } else {
         println!("{}", info.name);
