@@ -3,6 +3,7 @@ name = "peel"
 version = "0.1.0"
 edition = "2024"
 description = "A container image layer inspection tool"
+repository = "https://github.com/fudanglp/docker-layers"
 
 [[bin]]
 name = "peel"
@@ -21,3 +22,29 @@ serde_json = "1.0.149"
 sha2 = "0.10"
 tar = "0.4.44"
 tokio = { version = "1.49.0", features = ["full"] }
+
+# cargo-dist config (workspace-level required for ci)
+[workspace]
+members = ["."]
+
+# Config for 'dist'
+[workspace.metadata.dist]
+# The preferred dist version to use in CI (Cargo.toml SemVer syntax)
+cargo-dist-version = "0.30.4"
+# CI backends to support
+ci = "github"
+# Target platforms to build apps for (Rust target-triple syntax)
+targets = ["aarch64-apple-darwin", "aarch64-unknown-linux-gnu", "x86_64-apple-darwin", "x86_64-unknown-linux-gnu"]
+# The installers to generate for each app
+installers = ["shell"]
+# The archive format to use for non-windows builds (defaults .tar.xz)
+unix-archive = ".tar.gz"
+# Path that installers should place binaries in
+install-path = "CARGO_HOME"
+# Whether to install an updater program
+install-updater = false
+
+# The profile that 'dist' will build with
+[profile.dist]
+inherits = "release"
+lto = "thin"

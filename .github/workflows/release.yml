@@ -1,0 +1,84 @@
+# Release workflow - triggered by pushing a version tag (e.g. v0.1.0)
+# Builds platform binaries via cargo-dist and publishes a GitHub Release
+
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.plan.outputs.tag }}
+      matrix: ${{ steps.plan.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: Install cargo-dist
+        run: curl --proto '=https' --tlsv1.2 -LsSf https://github.com/axodotdev/cargo-dist/releases/download/v0.30.4/cargo-dist-installer.sh | sh
+      - name: Plan release
+        id: plan
+        run: |
+          dist plan --tag="${GITHUB_REF_NAME}" --output-format=json > plan.json
+          echo "tag=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+          # Build matrix from plan
+          cat plan.json | jq -c '.ci.github.artifacts_matrix' > matrix.json
+          echo "matrix=$(cat matrix.json)" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: plan
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.plan.outputs.matrix) }}
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: Install cargo-dist
+        shell: ${{ matrix.install_dist.shell }}
+        run: ${{ matrix.install_dist.run }}
+      - name: Build artifacts
+        run: dist build --tag="${{ needs.plan.outputs.tag }}" ${{ matrix.dist_args }} --output-format=json > dist-manifest.json
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: artifacts-${{ matrix.host }}
+          path: |
+            target/distrib/
+
+  publish:
+    needs: [plan, build]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: Install cargo-dist
+        run: curl --proto '=https' --tlsv1.2 -LsSf https://github.com/axodotdev/cargo-dist/releases/download/v0.30.4/cargo-dist-installer.sh | sh
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: artifacts-*
+          merge-multiple: true
+          path: target/distrib/
+      - name: Build global artifacts (installer scripts)
+        run: dist build --tag="${{ needs.plan.outputs.tag }}" --artifacts=global --output-format=json > dist-manifest.json
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          dist plan --tag="${{ needs.plan.outputs.tag }}" --output-format=json > plan.json
+          TITLE=$(jq -r '.announcement_title // empty' plan.json)
+          BODY=$(jq -r '.announcement_github_body // empty' plan.json)
+          gh release create "${{ needs.plan.outputs.tag }}" \
+            --title "${TITLE:-${{ needs.plan.outputs.tag }}}" \
+            --notes "${BODY:-Release ${{ needs.plan.outputs.tag }}}" \
+            target/distrib/*
