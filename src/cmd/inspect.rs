@@ -52,6 +52,8 @@ pub fn run(image: &str, use_oci: bool, json: Option<&str>, runtime: Option<Strin
         }
     };
 
+    print_runtime_summary(cfg);
+
     let mut info = inspector.inspect(image)?;
 
     // Populate file lists for each layer
@@ -86,6 +88,42 @@ pub fn run(image: &str, use_oci: bool, json: Option<&str>, runtime: Option<Strin
     }
 
     Ok(())
+}
+
+fn print_runtime_summary(cfg: &config::AppConfig) {
+    let mut stderr = io::stderr();
+
+    if cfg.probe.runtimes.is_empty() {
+        let _ = writeln!(stderr, "{} No container runtimes detected", "!".yellow().bold());
+        return;
+    }
+
+    let detected: Vec<String> = cfg
+        .probe
+        .runtimes
+        .iter()
+        .map(|rt| rt.kind.to_string())
+        .collect();
+    let _ = writeln!(
+        stderr,
+        "{} {}",
+        "Runtimes".dim(),
+        detected.join(", ")
+    );
+
+    if let Some(idx) = cfg.probe.default {
+        let rt = &cfg.probe.runtimes[idx];
+        let _ = writeln!(
+            stderr,
+            "{} {} (storage: {}, driver: {})",
+            "Selected".dim(),
+            style::style(&rt.kind).green().bold(),
+            style::style(rt.storage_root.display()).dim(),
+            style::style(&rt.storage_driver).dim(),
+        );
+    }
+
+    let _ = writeln!(stderr);
 }
 
 fn looks_like_archive(image: &str) -> bool {
@@ -136,6 +174,7 @@ fn maybe_escalate(rt: &RuntimeInfo) -> Result<()> {
     let answer = answer.trim().to_lowercase();
 
     if answer.is_empty() || answer == "y" || answer == "yes" {
+        writeln!(stderr, "{}", "─".repeat(40).dim())?;
         escalate_with_sudo()?;
     }
 
