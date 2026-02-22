@@ -14,6 +14,10 @@ pub fn run(image: &str, use_oci: bool, json: Option<&str>, runtime: Option<Strin
     config::init_from_cli(json.is_some(), runtime)?;
     let cfg = config::get();
 
+    print_runtime_summary(cfg);
+
+    let spinner = Spinner::new("Resolving image metadata...");
+
     // If the image looks like a tar file, use the archive inspector directly
     let mut inspector: Box<dyn Inspector> = if looks_like_archive(image) {
         Box::new(inspector::docker_archive::DockerArchiveInspector::new(
@@ -26,7 +30,9 @@ pub fn run(image: &str, use_oci: bool, json: Option<&str>, runtime: Option<Strin
             .default
             .map(|i| cfg.probe.runtimes[i].binary_path.display().to_string())
             .unwrap_or_else(|| "docker".to_string());
-        Box::new(inspector::oci::OciInspector::new(cmd))
+        let mut oci = inspector::oci::OciInspector::new(cmd);
+        oci.set_progress_bar(spinner.clone_bar());
+        Box::new(oci)
     } else {
         // Direct storage access — may need sudo
         if let Some(idx) = cfg.probe.default {
@@ -43,9 +49,11 @@ pub fn run(image: &str, use_oci: bool, json: Option<&str>, runtime: Option<Strin
                 }
                 _ => {
                     // Unsupported storage driver for direct access, fall back to OCI
-                    Box::new(inspector::oci::OciInspector::new(
+                    let mut oci = inspector::oci::OciInspector::new(
                         rt.binary_path.display().to_string(),
-                    ))
+                    );
+                    oci.set_progress_bar(spinner.clone_bar());
+                    Box::new(oci)
                 }
             }
         } else {
@@ -53,9 +61,6 @@ pub fn run(image: &str, use_oci: bool, json: Option<&str>, runtime: Option<Strin
         }
     };
 
-    print_runtime_summary(cfg);
-
-    let spinner = Spinner::new("Resolving image metadata...");
     let mut info = inspector.inspect(image)?;
 
     let num_layers = info.layers.len();
