@@ -130,6 +130,29 @@ impl OciInspector {
         }
     }
 
+    fn start_parse_progress(&self, total: u64) {
+        if let Some(bar) = &self.progress {
+            bar.set_length(total);
+            bar.set_position(0);
+            bar.set_style(
+                indicatif::ProgressStyle::with_template(
+                    "{spinner:.dim} Parsing layers [{bar:20}] {pos}/{len} ({elapsed_precise:.>5})",
+                )
+                .unwrap()
+                .with_key("elapsed_precise", |state: &indicatif::ProgressState, w: &mut dyn std::fmt::Write| {
+                    let _ = write!(w, "{}s", state.elapsed().as_secs());
+                })
+                .progress_chars("━╸░"),
+            );
+        }
+    }
+
+    fn inc_parse_progress(&self) {
+        if let Some(bar) = &self.progress {
+            bar.inc(1);
+        }
+    }
+
     fn temp_path() -> PathBuf {
         std::env::temp_dir().join(format!("peel-save-{}.tar", std::process::id()))
     }
@@ -184,9 +207,12 @@ impl OciInspector {
             bar.set_position(0);
             bar.set_style(
                 indicatif::ProgressStyle::with_template(
-                    "{spinner:.dim} {msg} [{bar:20}] {bytes}/{total_bytes} ({elapsed})",
+                    "{spinner:.dim} {msg} [{bar:20}] {bytes}/{total_bytes} ({elapsed_precise:.>5})",
                 )
                 .unwrap()
+                .with_key("elapsed_precise", |state: &indicatif::ProgressState, w: &mut dyn std::fmt::Write| {
+                    let _ = write!(w, "{}s", state.elapsed().as_secs());
+                })
                 .progress_chars("━╸░"),
             );
 
@@ -319,6 +345,7 @@ impl OciInspector {
             format!("{} exported ({})", image, size_str),
             format!("Parsing {} layers ...", layers.len()),
         );
+        self.start_parse_progress(layers.len() as u64);
         let parse_result = self.parse_docker_archive(&tmp);
         let _ = std::fs::remove_file(&tmp);
         parse_result?;
@@ -352,6 +379,7 @@ impl OciInspector {
                         .context("Failed to parse manifest.json from docker save output")?,
                 );
             } else if entry_path.ends_with("/layer.tar") {
+                self.inc_parse_progress();
                 let files = Self::parse_layer_entry(&mut entry)
                     .with_context(|| format!("Failed to parse layer {entry_path}"))?;
                 layer_files.insert(entry_path, files);
@@ -363,6 +391,34 @@ impl OciInspector {
             .into_iter()
             .next()
             .context("Empty manifest in docker save output")?;
+
+        // Modern Docker (v25+) uses OCI-layout archives where layers are stored as
+        // blobs/sha256/<hash> instead of <id>/layer.tar.  If any manifest layer
+        // paths weren't found in the first pass, do a second pass targeting them.
+        let missing: Vec<String> = me
+            .layers
+            .iter()
+            .filter(|p| !layer_files.contains_key(p.as_str()))
+            .cloned()
+            .collect();
+
+        if !missing.is_empty() {
+            let file = std::fs::File::open(path)
+                .with_context(|| format!("Failed to open {}", path.display()))?;
+            let mut archive = tar::Archive::new(file);
+
+            for entry_result in archive.entries().context("Failed to read tar entries")? {
+                let mut entry = entry_result.context("Failed to read tar entry")?;
+                let entry_path = entry.path()?.to_string_lossy().to_string();
+
+                if missing.iter().any(|m| m == &entry_path) {
+                    self.inc_parse_progress();
+                    let files = Self::parse_layer_entry(&mut entry)
+                        .with_context(|| format!("Failed to parse layer {entry_path}"))?;
+                    layer_files.insert(entry_path, files);
+                }
+            }
+        }
 
         for (i, tar_path) in me.layers.iter().enumerate() {
             if let Some(diff_id) = self.diff_ids.get(i) {
@@ -455,6 +511,7 @@ impl OciInspector {
         }
 
         // Pass 2: read layer blobs (large entries skipped in pass 1)
+        self.start_parse_progress(diff_ids.len() as u64);
         let file = std::fs::File::open(path)?;
         let mut archive = tar::Archive::new(file);
 
@@ -466,6 +523,7 @@ impl OciInspector {
                 let digest_str = format!("sha256:{hash}");
                 if let Some(diff_id) = digest_to_diffid.get(digest_str.as_str()) {
                     if !self.cached_files.contains_key(*diff_id) {
+                        self.inc_parse_progress();
                         let files = Self::parse_layer_entry(&mut entry)
                             .with_context(|| format!("Failed to parse layer {digest_str}"))?;
                         self.cached_files.insert((*diff_id).to_string(), files);
@@ -478,6 +536,7 @@ impl OciInspector {
         for (digest, data) in &small_blobs {
             if let Some(diff_id) = digest_to_diffid.get(digest.as_str()) {
                 if !self.cached_files.contains_key(*diff_id) {
+                    self.inc_parse_progress();
                     let files = Self::parse_layer_bytes(data)
                         .with_context(|| format!("Failed to parse layer {digest}"))?;
                     self.cached_files.insert((*diff_id).to_string(), files);
