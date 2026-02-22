@@ -7,7 +7,7 @@ use crossterm::style::{self, Stylize};
 
 use crate::config;
 use crate::inspector::{self, Inspector};
-use crate::probe::{RuntimeInfo, StorageDriver};
+use crate::probe::{RuntimeInfo, RuntimeKind, StorageDriver};
 use crate::progress::Spinner;
 
 pub fn run(image: &str, use_oci: bool, json: Option<&str>, runtime: Option<String>, web: bool, no_sudo: bool) -> Result<()> {
@@ -25,12 +25,15 @@ pub fn run(image: &str, use_oci: bool, json: Option<&str>, runtime: Option<Strin
         ))
     } else if use_oci {
         // Use OCI/runtime API path
-        let cmd = cfg
+        let (cmd, kind) = cfg
             .probe
             .default
-            .map(|i| cfg.probe.runtimes[i].binary_path.display().to_string())
-            .unwrap_or_else(|| "docker".to_string());
-        let mut oci = inspector::oci::OciInspector::new(cmd);
+            .map(|i| {
+                let rt = &cfg.probe.runtimes[i];
+                (rt.binary_path.display().to_string(), rt.kind.clone())
+            })
+            .unwrap_or_else(|| ("docker".to_string(), RuntimeKind::Docker));
+        let mut oci = inspector::oci::OciInspector::new(cmd, kind);
         oci.set_progress_bar(spinner.clone_bar());
         Box::new(oci)
     } else {
@@ -51,6 +54,7 @@ pub fn run(image: &str, use_oci: bool, json: Option<&str>, runtime: Option<Strin
                     // Unsupported storage driver for direct access, fall back to OCI
                     let mut oci = inspector::oci::OciInspector::new(
                         rt.binary_path.display().to_string(),
+                        rt.kind.clone(),
                     );
                     oci.set_progress_bar(spinner.clone_bar());
                     Box::new(oci)

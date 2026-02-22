@@ -8,6 +8,7 @@ use indicatif::ProgressBar;
 use serde::Deserialize;
 
 use super::{FileEntry, ImageInfo, Inspector, LayerInfo};
+use crate::probe::RuntimeKind;
 
 // --- Docker CLI JSON output ---
 
@@ -86,7 +87,8 @@ struct OciHistoryEntry {
 /// Reads layers via the container runtime CLI (`docker`/`podman`/`ctr`).
 /// Cross-platform, no root needed, but slower (requires CLI calls).
 pub struct OciInspector {
-    runtime_cmd: String,
+    cmd: String,
+    kind: RuntimeKind,
     image_name: Option<String>,
     diff_ids: Vec<String>,
     cached_files: HashMap<String, Vec<FileEntry>>,
@@ -95,9 +97,10 @@ pub struct OciInspector {
 }
 
 impl OciInspector {
-    pub fn new(runtime_cmd: String) -> Self {
+    pub fn new(cmd: String, kind: RuntimeKind) -> Self {
         Self {
-            runtime_cmd,
+            cmd,
+            kind,
             image_name: None,
             diff_ids: Vec::new(),
             cached_files: HashMap::new(),
@@ -127,47 +130,42 @@ impl OciInspector {
         }
     }
 
-    fn is_ctr(&self) -> bool {
-        Path::new(&self.runtime_cmd)
-            .file_name()
-            .map(|n| n == "ctr")
-            .unwrap_or(false)
-    }
-
-    fn is_podman(&self) -> bool {
-        self.runtime_cmd.contains("podman")
-    }
-
     fn temp_path() -> PathBuf {
         std::env::temp_dir().join(format!("peel-save-{}.tar", std::process::id()))
     }
 
     /// Save/export the image to a temp file.
-    /// For docker/podman with a known `total_size`, pipes stdout and shows a progress bar.
     fn save_to_file(&self, image: &str, total_size: Option<u64>) -> Result<PathBuf> {
+        match self.kind {
+            RuntimeKind::Containerd => self.save_via_export(image),
+            RuntimeKind::Docker | RuntimeKind::Podman => self.save_via_pipe(image, total_size),
+        }
+    }
+
+    /// ctr requires a file path argument — no stdout piping.
+    fn save_via_export(&self, image: &str) -> Result<PathBuf> {
         let tmp = Self::temp_path();
         let tmp_str = tmp.to_string_lossy();
 
-        if self.is_ctr() {
-            // ctr requires a file path argument — no stdout piping
-            let output = Command::new(&self.runtime_cmd)
-                .args(["image", "export", &tmp_str, image])
-                .output()
-                .with_context(|| {
-                    format!("Failed to run '{} image export'", self.runtime_cmd)
-                })?;
-            if !output.status.success() {
-                let _ = std::fs::remove_file(&tmp);
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                bail!("Failed to export '{}': {}", image, stderr.trim());
-            }
-            return Ok(tmp);
+        let output = Command::new(&self.cmd)
+            .args(["image", "export", &tmp_str, image])
+            .output()
+            .with_context(|| format!("Failed to run '{} image export'", self.cmd))?;
+        if !output.status.success() {
+            let _ = std::fs::remove_file(&tmp);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            bail!("Failed to export '{}': {}", image, stderr.trim());
         }
+        Ok(tmp)
+    }
 
-        // docker/podman: pipe stdout → temp file with byte-level progress
-        let mut cmd = Command::new(&self.runtime_cmd);
+    /// docker/podman: pipe stdout to temp file with byte-level progress.
+    fn save_via_pipe(&self, image: &str, total_size: Option<u64>) -> Result<PathBuf> {
+        let tmp = Self::temp_path();
+
+        let mut cmd = Command::new(&self.cmd);
         cmd.args(["save", image]);
-        if self.is_podman() {
+        if matches!(self.kind, RuntimeKind::Podman) {
             cmd.arg("--format=docker-archive");
         }
 
@@ -175,7 +173,7 @@ impl OciInspector {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
-            .with_context(|| format!("Failed to run '{} save'", self.runtime_cmd))?;
+            .with_context(|| format!("Failed to run '{} save'", self.cmd))?;
 
         let mut stdout = child.stdout.take().context("Failed to capture stdout")?;
         let mut file = std::fs::File::create(&tmp)
@@ -226,18 +224,18 @@ impl OciInspector {
         let (name, tag) = parse_image_ref(image);
 
         // `docker image inspect`
-        let inspect_out = Command::new(&self.runtime_cmd)
+        let inspect_out = Command::new(&self.cmd)
             .args(["image", "inspect", image, "--format", "{{json .}}"])
             .output()
             .with_context(|| {
-                format!("Failed to run '{} image inspect'", self.runtime_cmd)
+                format!("Failed to run '{} image inspect'", self.cmd)
             })?;
 
         if !inspect_out.status.success() {
             let stderr = String::from_utf8_lossy(&inspect_out.stderr);
             bail!(
                 "'{} image inspect {}' failed: {}",
-                self.runtime_cmd,
+                self.cmd,
                 image,
                 stderr.trim()
             );
@@ -249,20 +247,20 @@ impl OciInspector {
         let diff_ids = di.rootfs.layers;
 
         // `docker image history`
-        let history_out = Command::new(&self.runtime_cmd)
+        let history_out = Command::new(&self.cmd)
             .args([
                 "image", "history", image, "--no-trunc", "--format", "{{json .}}",
             ])
             .output()
             .with_context(|| {
-                format!("Failed to run '{} image history'", self.runtime_cmd)
+                format!("Failed to run '{} image history'", self.cmd)
             })?;
 
         if !history_out.status.success() {
             let stderr = String::from_utf8_lossy(&history_out.stderr);
             bail!(
                 "'{} image history {}' failed: {}",
-                self.runtime_cmd,
+                self.cmd,
                 image,
                 stderr.trim()
             );
@@ -584,10 +582,9 @@ impl OciInspector {
 
 impl Inspector for OciInspector {
     fn inspect(&mut self, image: &str) -> Result<ImageInfo> {
-        if self.is_ctr() {
-            self.inspect_via_export(image)
-        } else {
-            self.inspect_via_cli(image)
+        match self.kind {
+            RuntimeKind::Containerd => self.inspect_via_export(image),
+            RuntimeKind::Docker | RuntimeKind::Podman => self.inspect_via_cli(image),
         }
     }
 
