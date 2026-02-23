@@ -9,7 +9,7 @@ release new_version:
     @echo "Releasing v{{new_version}} (current: v{{version}})"
     sed -i 's/^version = ".*"/version = "{{new_version}}"/' Cargo.toml
     cargo check
-    cargo dist generate
+    dist generate
     git add Cargo.toml Cargo.lock .github/
     git commit -m "Release v{{new_version}}"
     git tag "v{{new_version}}"
