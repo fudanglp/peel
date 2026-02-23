@@ -49,6 +49,9 @@ enum Commands {
 
     /// Detect installed container runtimes
     Probe,
+
+    /// Update peel to the latest version
+    Update,
 }
 
 fn main() -> Result<()> {
@@ -71,6 +74,8 @@ fn main() -> Result<()> {
         cmd::inspect::run(image, cli.use_oci, cli.json.as_deref(), cli.runtime, web, cli.no_sudo)?;
     } else if matches!(cli.command, Some(Commands::Probe)) {
         cmd::probe::run(cli.json.is_some(), cli.runtime)?;
+    } else if matches!(cli.command, Some(Commands::Update)) {
+        cmd::self_update::run()?;
     }
 
     Ok(())

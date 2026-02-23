@@ -41,9 +41,9 @@ installers = ["shell"]
 # The archive format to use for non-windows builds (defaults .tar.xz)
 unix-archive = ".tar.gz"
 # Path that installers should place binaries in
-install-path = "CARGO_HOME"
+install-path = "~/.local/bin"
 # Whether to install an updater program
-install-updater = false
+install-updater = true
 
 # The profile that 'dist' will build with
 [profile.dist]
