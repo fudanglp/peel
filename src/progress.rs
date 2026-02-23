@@ -32,6 +32,7 @@ impl Spinner {
 
     /// Clear the spinner and print a `✔ message` line to stderr.
     pub fn finish(self, message: impl Into<String>) {
+        self.bar.disable_steady_tick();
         self.bar.finish_and_clear();
         eprintln!("{} {}", "✔".green(), message.into());
     }

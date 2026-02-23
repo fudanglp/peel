@@ -41,7 +41,11 @@ pub fn run(image: &str, use_oci: bool, json: Option<&str>, runtime: Option<Strin
         if let Some(idx) = cfg.probe.default {
             let rt = &cfg.probe.runtimes[idx];
             if !rt.can_read {
+                // Finish spinner before escalating — sudo re-execs the process
+                // and the parent's spinner would otherwise keep ticking.
+                spinner.finish("Resolved image metadata");
                 maybe_escalate(rt, no_sudo)?;
+                unreachable!();
             }
             match rt.storage_driver {
                 #[cfg(target_os = "linux")]
