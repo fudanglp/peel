@@ -93,7 +93,11 @@ cargo run -- python:3.10
 
 ### Releasing
 
-Requires [just](https://github.com/casey/just):
+Requires [just](https://github.com/casey/just) and [cargo-dist](https://opensource.axo.dev/cargo-dist/):
+
+```sh
+cargo install just cargo-dist
+```
 
 ```sh
 just current        # show current version
