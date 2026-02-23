@@ -1,12 +1,13 @@
 use std::collections::HashMap;
-use std::io::{Cursor, Read, Write};
-use std::path::{Path, PathBuf};
+use std::io::{Read, Write};
+use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
 use anyhow::{bail, Context, Result};
 use indicatif::ProgressBar;
 use serde::Deserialize;
 
+use super::archive::{self, ArchiveResult};
 use super::{FileEntry, ImageInfo, Inspector, LayerInfo};
 use crate::probe::RuntimeKind;
 
@@ -36,61 +37,11 @@ struct HistoryLine {
     size: String,
 }
 
-// --- Docker archive (docker save) ---
-
-#[derive(Deserialize)]
-struct DockerManifestEntry {
-    #[serde(rename = "Layers")]
-    layers: Vec<String>,
-}
-
-// --- OCI archive (ctr image export) ---
-
-#[derive(Deserialize)]
-struct OciIndex {
-    manifests: Vec<OciDescriptor>,
-}
-
-#[derive(Deserialize)]
-struct OciDescriptor {
-    digest: String,
-    #[serde(default)]
-    size: u64,
-}
-
-#[derive(Deserialize)]
-struct OciManifest {
-    config: OciDescriptor,
-    layers: Vec<OciDescriptor>,
-}
-
-#[derive(Deserialize)]
-struct OciConfig {
-    architecture: Option<String>,
-    rootfs: OciRootFS,
-    #[serde(default)]
-    history: Vec<OciHistoryEntry>,
-}
-
-#[derive(Deserialize)]
-struct OciRootFS {
-    diff_ids: Vec<String>,
-}
-
-#[derive(Deserialize)]
-struct OciHistoryEntry {
-    created_by: Option<String>,
-    #[serde(default)]
-    empty_layer: bool,
-}
-
 /// Reads layers via the container runtime CLI (`docker`/`podman`/`ctr`).
 /// Cross-platform, no root needed, but slower (requires CLI calls).
 pub struct OciInspector {
     cmd: String,
     kind: RuntimeKind,
-    image_name: Option<String>,
-    diff_ids: Vec<String>,
     cached_files: HashMap<String, Vec<FileEntry>>,
     cache_populated: bool,
     progress: Option<ProgressBar>,
@@ -101,8 +52,6 @@ impl OciInspector {
         Self {
             cmd,
             kind,
-            image_name: None,
-            diff_ids: Vec::new(),
             cached_files: HashMap::new(),
             cache_populated: false,
             progress: None,
@@ -147,10 +96,10 @@ impl OciInspector {
         }
     }
 
-    fn inc_parse_progress(&self) {
-        if let Some(bar) = &self.progress {
-            bar.inc(1);
-        }
+    fn make_progress_callback(&self) -> Option<archive::OnLayerParsed> {
+        self.progress.clone().map(|bar| {
+            Box::new(move || bar.inc(1)) as archive::OnLayerParsed
+        })
     }
 
     fn temp_path() -> PathBuf {
@@ -244,10 +193,16 @@ impl OciInspector {
         Ok(tmp)
     }
 
+    fn store_result(&mut self, result: ArchiveResult) -> ImageInfo {
+        self.cached_files = result.files;
+        self.cache_populated = true;
+        result.info
+    }
+
     // ---- Docker / Podman: fast metadata via CLI ----
 
     fn inspect_via_cli(&mut self, image: &str) -> Result<ImageInfo> {
-        let (name, tag) = parse_image_ref(image);
+        let (name, tag) = archive::parse_image_ref(image);
 
         // `docker image inspect`
         let inspect_out = Command::new(&self.cmd)
@@ -314,27 +269,7 @@ impl OciInspector {
             .map(|e| (e.created_by.clone(), parse_docker_size(&e.size)))
             .collect();
 
-        let mut layers = Vec::with_capacity(diff_ids.len());
-        let mut total_size = 0u64;
-
-        for (i, digest) in diff_ids.iter().enumerate() {
-            let (created_by, size) = non_empty
-                .get(i)
-                .map(|(cmd, sz)| (cmd.clone(), *sz))
-                .unwrap_or((None, 0));
-            total_size += size;
-            layers.push(LayerInfo {
-                digest: digest.clone(),
-                created_by,
-                size,
-                files: Vec::new(),
-            });
-        }
-
-        self.image_name = Some(image.to_string());
-        self.diff_ids = diff_ids.clone();
-
-        // Save image and parse all layer file listings up front
+        // Save image and parse all layer file listings via shared archive lib
         let size_str = format_bytes(di.size);
         self.finish_step(
             "Resolved image metadata",
@@ -343,98 +278,33 @@ impl OciInspector {
         let tmp = self.save_to_file(image, Some(di.size))?;
         self.finish_step(
             format!("{} exported ({})", image, size_str),
-            format!("Parsing {} layers ...", layers.len()),
+            format!("Parsing {} layers ...", diff_ids.len()),
         );
-        self.start_parse_progress(layers.len() as u64);
-        let parse_result = self.parse_docker_archive(&tmp);
+        self.start_parse_progress(diff_ids.len() as u64);
+        let mut on_layer = self.make_progress_callback();
+        let result = archive::parse_archive(&tmp, &name, &tag, Some(&diff_ids), &mut on_layer);
         let _ = std::fs::remove_file(&tmp);
-        parse_result?;
+        let mut result = result?;
 
-        Ok(ImageInfo {
-            name,
-            tag: Some(tag),
-            architecture: di.architecture,
-            total_size,
-            layers,
-        })
-    }
-
-    fn parse_docker_archive(&mut self, path: &Path) -> Result<()> {
-        let file = std::fs::File::open(path)
-            .with_context(|| format!("Failed to open {}", path.display()))?;
-        let mut archive = tar::Archive::new(file);
-
-        let mut layer_files: HashMap<String, Vec<FileEntry>> = HashMap::new();
-        let mut manifest: Option<Vec<DockerManifestEntry>> = None;
-
-        for entry_result in archive.entries().context("Failed to read tar entries")? {
-            let mut entry = entry_result.context("Failed to read tar entry")?;
-            let entry_path = entry.path()?.to_string_lossy().to_string();
-
-            if entry_path == "manifest.json" {
-                let mut content = String::new();
-                entry.read_to_string(&mut content)?;
-                manifest = Some(
-                    serde_json::from_str(&content)
-                        .context("Failed to parse manifest.json from docker save output")?,
-                );
-            } else if entry_path.ends_with("/layer.tar") {
-                self.inc_parse_progress();
-                let files = Self::parse_layer_entry(&mut entry)
-                    .with_context(|| format!("Failed to parse layer {entry_path}"))?;
-                layer_files.insert(entry_path, files);
+        // Override layer metadata with the richer CLI-sourced info
+        let mut total_size = 0u64;
+        for (i, layer) in result.info.layers.iter_mut().enumerate() {
+            if let Some((created_by, size)) = non_empty.get(i) {
+                layer.created_by = created_by.clone();
+                layer.size = *size;
+                total_size += size;
             }
         }
+        result.info.total_size = total_size;
+        result.info.architecture = di.architecture;
 
-        let manifest = manifest.context("manifest.json not found in docker save output")?;
-        let me = manifest
-            .into_iter()
-            .next()
-            .context("Empty manifest in docker save output")?;
-
-        // Modern Docker (v25+) uses OCI-layout archives where layers are stored as
-        // blobs/sha256/<hash> instead of <id>/layer.tar.  If any manifest layer
-        // paths weren't found in the first pass, do a second pass targeting them.
-        let missing: Vec<String> = me
-            .layers
-            .iter()
-            .filter(|p| !layer_files.contains_key(p.as_str()))
-            .cloned()
-            .collect();
-
-        if !missing.is_empty() {
-            let file = std::fs::File::open(path)
-                .with_context(|| format!("Failed to open {}", path.display()))?;
-            let mut archive = tar::Archive::new(file);
-
-            for entry_result in archive.entries().context("Failed to read tar entries")? {
-                let mut entry = entry_result.context("Failed to read tar entry")?;
-                let entry_path = entry.path()?.to_string_lossy().to_string();
-
-                if missing.iter().any(|m| m == &entry_path) {
-                    self.inc_parse_progress();
-                    let files = Self::parse_layer_entry(&mut entry)
-                        .with_context(|| format!("Failed to parse layer {entry_path}"))?;
-                    layer_files.insert(entry_path, files);
-                }
-            }
-        }
-
-        for (i, tar_path) in me.layers.iter().enumerate() {
-            if let Some(diff_id) = self.diff_ids.get(i) {
-                let files = layer_files.remove(tar_path).unwrap_or_default();
-                self.cached_files.insert(diff_id.clone(), files);
-            }
-        }
-
-        self.cache_populated = true;
-        Ok(())
+        Ok(self.store_result(result))
     }
 
     // ---- Containerd (ctr): metadata + files from OCI export ----
 
     fn inspect_via_export(&mut self, image: &str) -> Result<ImageInfo> {
-        let (name, tag) = parse_image_ref(image);
+        let (name, tag) = archive::parse_image_ref(image);
 
         self.finish_step(
             "Resolved image metadata",
@@ -445,197 +315,14 @@ impl OciInspector {
             format!("{} exported", image),
             "Parsing layers ...".to_string(),
         );
-        let result = self.parse_oci_archive(&tmp, &name, &tag);
+
+        let num_layers_guess = 10u64; // we don't know yet, progress will update
+        self.start_parse_progress(num_layers_guess);
+        let mut on_layer = self.make_progress_callback();
+        let result = archive::parse_archive(&tmp, &name, &tag, None, &mut on_layer);
         let _ = std::fs::remove_file(&tmp);
 
-        result
-    }
-
-    fn parse_oci_archive(&mut self, path: &Path, name: &str, tag: &str) -> Result<ImageInfo> {
-        // Pass 1: read index.json and small blobs (manifest, config).
-        // Skip large blobs (layers) to keep memory bounded.
-        let file = std::fs::File::open(path)?;
-        let mut archive = tar::Archive::new(file);
-
-        let mut index_data: Option<Vec<u8>> = None;
-        let mut small_blobs: HashMap<String, Vec<u8>> = HashMap::new();
-
-        for entry_result in archive.entries()? {
-            let mut entry = entry_result?;
-            let entry_path = entry.path()?.to_string_lossy().to_string();
-
-            if entry_path == "index.json" {
-                let mut data = Vec::new();
-                entry.read_to_end(&mut data)?;
-                index_data = Some(data);
-            } else if let Some(hash) = entry_path.strip_prefix("blobs/sha256/") {
-                if entry.size() < 1_000_000 {
-                    let mut data = Vec::new();
-                    entry.read_to_end(&mut data)?;
-                    small_blobs.insert(format!("sha256:{hash}"), data);
-                }
-            }
-        }
-
-        // Resolve index → manifest → config
-        let index: OciIndex = serde_json::from_slice(
-            index_data
-                .as_ref()
-                .context("index.json not found in OCI archive")?,
-        )
-        .context("Failed to parse index.json")?;
-
-        let manifest_desc = index.manifests.first().context("No manifests in index.json")?;
-        let manifest: OciManifest = serde_json::from_slice(
-            small_blobs
-                .get(&manifest_desc.digest)
-                .with_context(|| format!("Manifest blob {} not found", manifest_desc.digest))?,
-        )
-        .context("Failed to parse OCI manifest")?;
-
-        let config: OciConfig = serde_json::from_slice(
-            small_blobs
-                .get(&manifest.config.digest)
-                .with_context(|| format!("Config blob {} not found", manifest.config.digest))?,
-        )
-        .context("Failed to parse OCI image config")?;
-
-        let diff_ids = config.rootfs.diff_ids;
-
-        // Build compressed-digest → diff_id mapping
-        let mut digest_to_diffid: HashMap<&str, &str> = HashMap::new();
-        for (i, layer_desc) in manifest.layers.iter().enumerate() {
-            if let Some(diff_id) = diff_ids.get(i) {
-                digest_to_diffid.insert(&layer_desc.digest, diff_id);
-            }
-        }
-
-        // Pass 2: read layer blobs (large entries skipped in pass 1)
-        self.start_parse_progress(diff_ids.len() as u64);
-        let file = std::fs::File::open(path)?;
-        let mut archive = tar::Archive::new(file);
-
-        for entry_result in archive.entries()? {
-            let mut entry = entry_result?;
-            let entry_path = entry.path()?.to_string_lossy().to_string();
-
-            if let Some(hash) = entry_path.strip_prefix("blobs/sha256/") {
-                let digest_str = format!("sha256:{hash}");
-                if let Some(diff_id) = digest_to_diffid.get(digest_str.as_str()) {
-                    if !self.cached_files.contains_key(*diff_id) {
-                        self.inc_parse_progress();
-                        let files = Self::parse_layer_entry(&mut entry)
-                            .with_context(|| format!("Failed to parse layer {digest_str}"))?;
-                        self.cached_files.insert((*diff_id).to_string(), files);
-                    }
-                }
-            }
-        }
-
-        // Also parse any tiny layers that ended up in small_blobs
-        for (digest, data) in &small_blobs {
-            if let Some(diff_id) = digest_to_diffid.get(digest.as_str()) {
-                if !self.cached_files.contains_key(*diff_id) {
-                    self.inc_parse_progress();
-                    let files = Self::parse_layer_bytes(data)
-                        .with_context(|| format!("Failed to parse layer {digest}"))?;
-                    self.cached_files.insert((*diff_id).to_string(), files);
-                }
-            }
-        }
-
-        self.cache_populated = true;
-
-        // Match non-empty history entries to diff_ids (same as overlay2)
-        let mut created_by_list: Vec<Option<String>> = Vec::new();
-        for entry in &config.history {
-            if !entry.empty_layer {
-                created_by_list.push(entry.created_by.clone());
-            }
-        }
-
-        let mut layers = Vec::with_capacity(diff_ids.len());
-        let mut total_size = 0u64;
-
-        for (i, digest) in diff_ids.iter().enumerate() {
-            let size = manifest.layers.get(i).map(|d| d.size).unwrap_or(0);
-            total_size += size;
-            layers.push(LayerInfo {
-                digest: digest.clone(),
-                created_by: created_by_list.get(i).cloned().flatten(),
-                size,
-                files: Vec::new(),
-            });
-        }
-
-        self.image_name = Some(name.to_string());
-        self.diff_ids = diff_ids;
-
-        Ok(ImageInfo {
-            name: name.to_string(),
-            tag: Some(tag.to_string()),
-            architecture: config.architecture,
-            total_size,
-            layers,
-        })
-    }
-
-    // ---- Shared layer parsing ----
-
-    /// Read a layer tar entry and enumerate its files (auto-detects gzip).
-    fn parse_layer_entry<R: Read>(entry: &mut R) -> Result<Vec<FileEntry>> {
-        let mut data = Vec::new();
-        entry.read_to_end(&mut data)?;
-        Self::parse_layer_bytes(&data)
-    }
-
-    fn parse_layer_bytes(data: &[u8]) -> Result<Vec<FileEntry>> {
-        let is_gzip = data.len() >= 2 && data[0] == 0x1f && data[1] == 0x8b;
-        let cursor = Cursor::new(data);
-
-        if is_gzip {
-            Self::parse_inner_tar(flate2::read::GzDecoder::new(cursor))
-        } else {
-            Self::parse_inner_tar(cursor)
-        }
-    }
-
-    fn parse_inner_tar<R: Read>(reader: R) -> Result<Vec<FileEntry>> {
-        let mut archive = tar::Archive::new(reader);
-        let mut files = Vec::new();
-
-        for entry_result in archive.entries()? {
-            let entry = match entry_result {
-                Ok(e) => e,
-                Err(_) => continue,
-            };
-
-            if entry.header().entry_type().is_dir() {
-                continue;
-            }
-
-            let path = match entry.path() {
-                Ok(p) => p.to_path_buf(),
-                Err(_) => continue,
-            };
-
-            let name = path
-                .file_name()
-                .map(|n| n.to_string_lossy().to_string())
-                .unwrap_or_default();
-
-            let is_whiteout = name.starts_with(".wh.");
-            let size = if is_whiteout { 0 } else { entry.size() };
-
-            files.push(FileEntry {
-                path,
-                size,
-                is_whiteout,
-            });
-        }
-
-        files.sort_by(|a, b| a.path.cmp(&b.path));
-        Ok(files)
+        Ok(self.store_result(result?))
     }
 }
 
@@ -655,19 +342,6 @@ impl Inspector for OciInspector {
         self.cached_files
             .remove(&layer.digest)
             .with_context(|| format!("Layer {} not found in save output", layer.digest))
-    }
-}
-
-/// Parse `name:tag` handling registry port syntax (`registry:5000/foo:bar`).
-fn parse_image_ref(image: &str) -> (String, String) {
-    if let Some((n, t)) = image.rsplit_once(':') {
-        if t.contains('/') {
-            (image.to_string(), "latest".to_string())
-        } else {
-            (n.to_string(), t.to_string())
-        }
-    } else {
-        (image.to_string(), "latest".to_string())
     }
 }
 

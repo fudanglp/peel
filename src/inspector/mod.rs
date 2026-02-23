@@ -1,3 +1,4 @@
+pub mod archive;
 pub mod docker_archive;
 pub mod oci;
 
