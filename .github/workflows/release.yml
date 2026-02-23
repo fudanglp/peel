@@ -44,8 +44,7 @@ jobs:
           submodules: recursive
       - uses: dtolnay/rust-toolchain@stable
       - name: Install cargo-dist
-        shell: ${{ matrix.install_dist.shell }}
-        run: ${{ matrix.install_dist.run }}
+        run: curl --proto '=https' --tlsv1.2 -LsSf https://github.com/axodotdev/cargo-dist/releases/download/v0.30.4/cargo-dist-installer.sh | sh
       - name: Build artifacts
         run: dist build --tag="${{ needs.plan.outputs.tag }}" ${{ matrix.dist_args }} --output-format=json > dist-manifest.json
       - name: Upload artifacts
