@@ -14,7 +14,21 @@ pub fn run(image: &str, use_oci: bool, json: Option<&str>, runtime: Option<Strin
     config::init_from_cli(json.is_some(), runtime)?;
     let cfg = config::get();
 
-    print_runtime_summary(cfg);
+    let method = if looks_like_archive(image) {
+        "archive"
+    } else if use_oci {
+        "oci"
+    } else {
+        cfg.probe.default
+            .and_then(|idx| match cfg.probe.runtimes[idx].storage_driver {
+                #[cfg(target_os = "linux")]
+                StorageDriver::Overlay2 | StorageDriver::Fuse | StorageDriver::Vfs => Some("overlay2"),
+                _ => None,
+            })
+            .unwrap_or("oci")
+    };
+
+    print_runtime_summary(cfg, method);
 
     let spinner = Spinner::new("Resolving image metadata...");
 
@@ -142,7 +156,7 @@ pub fn run(image: &str, use_oci: bool, json: Option<&str>, runtime: Option<Strin
     Ok(())
 }
 
-fn print_runtime_summary(cfg: &config::AppConfig) {
+fn print_runtime_summary(cfg: &config::AppConfig, method: &str) {
     let mut stderr = io::stderr();
 
     if cfg.probe.runtimes.is_empty() {
@@ -167,11 +181,11 @@ fn print_runtime_summary(cfg: &config::AppConfig) {
         let rt = &cfg.probe.runtimes[idx];
         let _ = writeln!(
             stderr,
-            "{} {} (storage: {}, driver: {})",
+            "{} {} (storage: {}, method: {})",
             "Selected".dim(),
             style::style(&rt.kind).green().bold(),
             style::style(rt.storage_root.display()).dim(),
-            style::style(&rt.storage_driver).dim(),
+            style::style(method).dim(),
         );
     }
 
