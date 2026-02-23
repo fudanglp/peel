@@ -55,6 +55,7 @@ peel <image> --no-sudo         Don't auto-escalate to sudo
 peel <image> --runtime podman  Override runtime selection
 peel image.tar                 Inspect a tar archive directly
 peel probe                     List detected container runtimes
+peel update                    Update peel to the latest version
 ```
 
 ## Screenshots
@@ -88,4 +89,13 @@ By default, peel tries **overlay2** first (auto-escalating with `sudo`) because 
 ```sh
 cargo build
 cargo run -- python:3.10
+```
+
+### Releasing
+
+Requires [just](https://github.com/casey/just):
+
+```sh
+just current        # show current version
+just release 0.2.0  # bump version, regenerate CI, commit, tag, push
 ```
