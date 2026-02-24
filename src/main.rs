@@ -66,7 +66,7 @@ fn main() -> Result<()> {
 
     if cli.command.is_none() && image_to_inspect.is_none() {
         Cli::parse_from(["peel", "--help"]);
-        unreachable!()
+        return Ok(());
     }
 
     if let Some(image) = &image_to_inspect {
